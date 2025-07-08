@@ -1,4 +1,7 @@
 #![deny(rust_2018_idioms)]
+#![deny(missing_docs)]
+
+//! This crate provides a coroutine implementation based on Rust's async/await syntax.
 
 mod executor;
 mod yield_now;
@@ -7,15 +10,21 @@ use self::executor::Executor;
 use self::yield_now::yield_now;
 use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Poll};
 
+/// A generator is a coroutine that does not have a resume value.
 pub type Generator<Y, T> = Coroutine<Y, T, ()>;
 
+/// Represents the state of a coroutine, which can either yield a value of type `Y` or complete with
+/// a value of type `T`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum State<Y, T> {
+    /// The coroutine yielded a value of type `Y`.
     Yield(Y),
+    /// The coroutine completed with a value of type `T`.
     Complete(T),
 }
 
 impl<Y, T> State<Y, T> {
+    /// Returns `Some` with the yielded value if the state is [`Yield`], otherwise `None`.
     pub fn as_yield(&self) -> Option<&Y> {
         if let Self::Yield(v) = self {
             Some(v)
@@ -24,6 +33,7 @@ impl<Y, T> State<Y, T> {
         }
     }
 
+    /// Returns `Some` with the completed value if the state is [`Complete`], otherwise `None`.
     pub fn as_complete(&self) -> Option<&T> {
         if let Self::Complete(v) = self {
             Some(v)
@@ -44,6 +54,7 @@ impl<Y, T> State<Y, T> {
 }
 
 impl<T> State<T, T> {
+    /// Returns the value contained in the state, regardless of whether it is a yield or complete state.
     pub fn value(self) -> T {
         match self {
             Self::Yield(value) => value,
@@ -79,6 +90,8 @@ where
     }
 }
 
+/// A coroutine that can yield values of type `Y`, can be resumed with a value of type `R` and
+/// completes with a value of type `T`.
 pub struct Coroutine<Y, T, R> {
     executor: ExecutorState<Y, T, R>,
     yield_handle: YieldHandle<Y, R>,
@@ -88,6 +101,8 @@ impl<Y, T, R> Coroutine<Y, T, R>
 where
     T: 'static,
 {
+    /// Creates a new coroutine from a function that takes the [`YieldHandle`] and the initial
+    /// value. The function must return a future that resolves to the final value of type `T`.
     pub fn new<F>(f: impl FnOnce(YieldHandle<Y, R>, R) -> F + 'static) -> Self
     where
         F: Future<Output = T> + 'static,
@@ -106,6 +121,7 @@ where
         }
     }
 
+    /// Resumes the coroutine with a value of type `R`.
     pub fn resume_with(&mut self, resume: R) -> State<Y, T> {
         // Get executor
         let executor = self.executor.init_or_resume(&self.yield_handle, resume);
@@ -132,17 +148,21 @@ impl<Y, T> Generator<Y, T>
 where
     T: 'static,
 {
+    /// Resumes the generator.
     pub fn resume(&mut self) -> State<Y, T> {
         self.resume_with(())
     }
 }
 
+/// The yield handle can be used from within the coroutine to yield values and receive a resume
+/// value when the coroutine is resumed.
 pub struct YieldHandle<Y, R = ()> {
     value: Rc<RefCell<Option<Y>>>,
     resume: Rc<RefCell<Option<R>>>,
 }
 
 impl<Y, R> YieldHandle<Y, R> {
+    /// Yields a value and receives back the resume value when the coroutine is resumed.
     pub async fn yield_(&self, value: Y) -> R {
         // Extra scope necessary because of a false positive of clippy::await_holding_refcell_ref
         {
