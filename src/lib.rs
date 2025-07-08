@@ -89,10 +89,12 @@ impl<Y, T, R> Coroutine<Y, T, R> {
     fn step(&mut self) -> Option<State<Y, T>> {
         match self.executor.poll() {
             Poll::Ready(res) => Some(State::Complete(res)),
-            Poll::Pending => match self.yield_handle.value.borrow_mut().take() {
-                Some(yield_) => Some(State::Yield(yield_)),
-                None => None,
-            },
+            Poll::Pending => self
+                .yield_handle
+                .value
+                .borrow_mut()
+                .take()
+                .map(State::Yield),
         }
     }
 }
@@ -110,15 +112,18 @@ pub struct YieldHandle<Y, R = ()> {
 
 impl<Y, R> YieldHandle<Y, R> {
     pub async fn yield_(&self, value: Y) -> R {
-        // Set current
-        let mut current = self.value.borrow_mut();
-        match *current {
-            Some(_) => panic!("multiple values were yielded without awaiting them"),
-            None => *current = Some(value),
-        }
+        // Extra scope necessary because of a false positive of clippy::await_holding_refcell_ref
+        {
+            // Set current
+            let mut current = self.value.borrow_mut();
+            match *current {
+                Some(_) => panic!("multiple values were yielded without awaiting them"),
+                None => *current = Some(value),
+            }
 
-        // Drop current ref before yield
-        drop(current);
+            // Drop current ref before yield
+            drop(current);
+        }
 
         // Yield one "tick"
         yield_now().await;
@@ -157,21 +162,21 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let mut gen = Generator::<(), _>::new(|_handle| async {});
-        assert_eq!(gen.step(), Some(State::Complete(())));
+        let mut generator = Generator::<(), _>::new(|_handle| async {});
+        assert_eq!(generator.step(), Some(State::Complete(())));
     }
 
     #[test]
     fn test_yield() {
-        let mut gen = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle| async move {
             handle.yield_(true).await;
             handle.yield_(false).await;
             "Bye"
         });
 
-        assert_eq!(gen.resume(), State::Yield(true));
-        assert_eq!(gen.resume(), State::Yield(false));
-        assert_eq!(gen.resume(), State::Complete("Bye"));
+        assert_eq!(generator.resume(), State::Yield(true));
+        assert_eq!(generator.resume(), State::Yield(false));
+        assert_eq!(generator.resume(), State::Complete("Bye"));
     }
 
     #[test]
@@ -215,7 +220,7 @@ mod tests {
             handle.yield_(helper(value).await).await;
         }
 
-        let mut gen = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle| async move {
             handle.yield_(42).await;
             handle.yield_(helper(1).await).await;
             producer(&handle, 13).await;
@@ -223,41 +228,42 @@ mod tests {
             "Bye"
         });
 
-        assert_eq!(gen.resume(), State::Yield(42));
-        assert_eq!(gen.resume(), State::Yield(2));
-        assert_eq!(gen.resume(), State::Yield(0));
-        assert_eq!(gen.resume(), State::Yield(26));
-        assert_eq!(gen.resume(), State::Yield(0));
-        assert_eq!(gen.resume(), State::Yield(-2));
-        assert_eq!(gen.resume(), State::Complete("Bye"));
+        assert_eq!(generator.resume(), State::Yield(42));
+        assert_eq!(generator.resume(), State::Yield(2));
+        assert_eq!(generator.resume(), State::Yield(0));
+        assert_eq!(generator.resume(), State::Yield(26));
+        assert_eq!(generator.resume(), State::Yield(0));
+        assert_eq!(generator.resume(), State::Yield(-2));
+        assert_eq!(generator.resume(), State::Complete("Bye"));
     }
 
     #[test]
     fn test_yield_missing_await() {
-        let mut gen = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle| async move {
+            #[expect(clippy::let_underscore_future)]
             let _ = handle.yield_(true); // Never gets yield
             handle.yield_(true).await;
             handle.yield_(false).await;
             "Bye"
         });
 
-        assert_eq!(gen.resume(), State::Yield(true));
-        assert_eq!(gen.resume(), State::Yield(false));
-        assert_eq!(gen.resume(), State::Complete("Bye"));
+        assert_eq!(generator.resume(), State::Yield(true));
+        assert_eq!(generator.resume(), State::Yield(false));
+        assert_eq!(generator.resume(), State::Complete("Bye"));
     }
 
     #[test]
     #[should_panic(expected = "`async fn` resumed after completion")]
     fn test_resumed_after_completion() {
-        let mut gen = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle| async move {
             handle.yield_(42i32).await;
             handle.yield_(21).await;
             "Ok"
         });
 
-        assert_eq!(gen.resume(), State::Yield(42));
-        assert_eq!(gen.resume(), State::Yield(21));
-        assert_eq!(gen.resume(), State::Complete("Ok"));
-        gen.resume(); // This panics
+        assert_eq!(generator.resume(), State::Yield(42));
+        assert_eq!(generator.resume(), State::Yield(21));
+        assert_eq!(generator.resume(), State::Complete("Ok"));
+        generator.resume(); // This panics
     }
 }

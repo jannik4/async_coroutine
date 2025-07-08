@@ -2,7 +2,7 @@
 name = "async-coroutine"
 version = "0.1.0"
 authors = ["Jannik Obermann <jannik.obermann@gmail.com>"]
-edition = "2018"
+edition = "2024"
 publish = false
 
 [dependencies]
