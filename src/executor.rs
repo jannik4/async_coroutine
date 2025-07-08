@@ -22,8 +22,8 @@ struct Task<R> {
 }
 
 impl<R> Task<R> {
-    fn new(future: impl Future<Output = R> + 'static) -> Self {
-        Task { future: Box::pin(future) }
+    fn new(future: Pin<Box<dyn Future<Output = R>>>) -> Self {
+        Task { future }
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> Poll<R> {
@@ -37,8 +37,10 @@ pub struct Executor<T> {
 }
 
 impl<T> Executor<T> {
-    pub fn new(future: impl Future<Output = T> + 'static) -> Self {
-        Self { task: Task::new(future) }
+    pub fn new(future: Pin<Box<dyn Future<Output = T>>>) -> Self {
+        Self {
+            task: Task::new(future),
+        }
     }
 
     pub fn poll(&mut self) -> Poll<T> {

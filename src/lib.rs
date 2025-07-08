@@ -5,7 +5,7 @@ mod yield_now;
 
 use self::executor::Executor;
 use self::yield_now::yield_now;
-use std::{cell::RefCell, future::Future, rc::Rc, task::Poll};
+use std::{cell::RefCell, future::Future, pin::Pin, rc::Rc, task::Poll};
 
 pub type Generator<Y, T> = Coroutine<Y, T, ()>;
 
@@ -52,54 +52,86 @@ impl<T> State<T, T> {
     }
 }
 
+struct ExecutorState<Y, T, R> {
+    #[expect(clippy::type_complexity)]
+    init: Option<Box<dyn FnOnce(YieldHandle<Y, R>, R) -> Pin<Box<dyn Future<Output = T>>>>>,
+    executor: Option<Executor<T>>,
+}
+
+impl<Y, T, R> ExecutorState<Y, T, R>
+where
+    T: 'static,
+{
+    fn init_or_resume(&mut self, yield_handle: &YieldHandle<Y, R>, resume: R) -> &mut Executor<T> {
+        // Can not use match/if-let here because of borrow checker limitations
+        if self.executor.is_some() {
+            // Put resume into place
+            *yield_handle.resume.borrow_mut() = Some(resume);
+        } else {
+            // Initialize executor
+            self.executor = Some(Executor::new(self.init.take().unwrap()(
+                yield_handle.clone_(),
+                resume,
+            )));
+        }
+
+        self.executor.as_mut().unwrap()
+    }
+}
+
 pub struct Coroutine<Y, T, R> {
-    executor: Executor<T>,
+    executor: ExecutorState<Y, T, R>,
     yield_handle: YieldHandle<Y, R>,
 }
 
-impl<Y, T, R> Coroutine<Y, T, R> {
-    pub fn new<F>(producer: impl FnOnce(YieldHandle<Y, R>) -> F) -> Self
+impl<Y, T, R> Coroutine<Y, T, R>
+where
+    T: 'static,
+{
+    pub fn new<F>(f: impl FnOnce(YieldHandle<Y, R>, R) -> F + 'static) -> Self
     where
         F: Future<Output = T> + 'static,
     {
-        let yield_handle = YieldHandle {
-            value: Rc::new(RefCell::new(None)),
-            resume: Rc::new(RefCell::new(None)),
-        };
-        let future = producer(yield_handle.clone_());
-
         Self {
-            executor: Executor::new(future),
-            yield_handle,
+            executor: ExecutorState {
+                init: Some(Box::new(move |handle, initial_value| {
+                    Box::pin(f(handle, initial_value))
+                })),
+                executor: None,
+            },
+            yield_handle: YieldHandle {
+                value: Rc::new(RefCell::new(None)),
+                resume: Rc::new(RefCell::new(None)),
+            },
         }
     }
 
     pub fn resume_with(&mut self, resume: R) -> State<Y, T> {
-        // Put resume into place
-        *self.yield_handle.resume.borrow_mut() = Some(resume);
+        // Get executor
+        let executor = self.executor.init_or_resume(&self.yield_handle, resume);
 
         // Loop step
         loop {
-            if let Some(state) = self.step() {
+            let state = match executor.poll() {
+                Poll::Ready(res) => Some(State::Complete(res)),
+                Poll::Pending => self
+                    .yield_handle
+                    .value
+                    .borrow_mut()
+                    .take()
+                    .map(State::Yield),
+            };
+            if let Some(state) = state {
                 break state;
             }
         }
     }
-
-    fn step(&mut self) -> Option<State<Y, T>> {
-        match self.executor.poll() {
-            Poll::Ready(res) => Some(State::Complete(res)),
-            Poll::Pending => self
-                .yield_handle
-                .value
-                .borrow_mut()
-                .take()
-                .map(State::Yield),
-        }
-    }
 }
 
-impl<Y, T> Generator<Y, T> {
+impl<Y, T> Generator<Y, T>
+where
+    T: 'static,
+{
     pub fn resume(&mut self) -> State<Y, T> {
         self.resume_with(())
     }
@@ -135,19 +167,7 @@ impl<Y, R> YieldHandle<Y, R> {
             .expect("expected resume value")
     }
 
-    /// Take initial resume value. This only works before the first `yield_` call.
-    /// If you don't call this the first resume value is just dropped.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called multiple times or after any `yield_` call.
-    pub fn take_initial_resume(&self) -> R {
-        self.resume
-            .borrow_mut()
-            .take()
-            .expect("expected initial resume value")
-    }
-
+    // Private so that the user can not clone the handle
     fn clone_(&self) -> Self {
         Self {
             value: Rc::clone(&self.value),
@@ -162,13 +182,13 @@ mod tests {
 
     #[test]
     fn test_empty() {
-        let mut generator = Generator::<(), _>::new(|_handle| async {});
-        assert_eq!(generator.step(), Some(State::Complete(())));
+        let mut generator = Generator::<(), _>::new(|_handle, ()| async {});
+        assert_eq!(generator.resume(), State::Complete(()));
     }
 
     #[test]
     fn test_yield() {
-        let mut generator = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle, ()| async move {
             handle.yield_(true).await;
             handle.yield_(false).await;
             "Bye"
@@ -181,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_yield_resume() {
-        let mut co = Coroutine::new(|handle| async move {
+        let mut co = Coroutine::new(|handle, _init| async move {
             let resume = handle.yield_(42).await;
             let resume = handle.yield_(resume * 2).await;
             resume + 1
@@ -194,8 +214,7 @@ mod tests {
 
     #[test]
     fn test_yield_initial_resume() {
-        let mut co = Coroutine::new(|handle| async move {
-            let state = handle.take_initial_resume();
+        let mut co = Coroutine::new(|handle, state| async move {
             let state = handle.yield_(state + 1).await;
             let state = handle.yield_(state * 2).await;
             state + 7
@@ -215,16 +234,16 @@ mod tests {
             value * 2
         }
 
-        async fn producer(handle: &YieldHandle<i32>, value: i32) {
+        async fn nested(handle: &YieldHandle<i32>, value: i32) {
             handle.yield_(0).await;
             handle.yield_(helper(value).await).await;
         }
 
-        let mut generator = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle, ()| async move {
             handle.yield_(42).await;
             handle.yield_(helper(1).await).await;
-            producer(&handle, 13).await;
-            producer(&handle, -1).await;
+            nested(&handle, 13).await;
+            nested(&handle, -1).await;
             "Bye"
         });
 
@@ -239,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_yield_missing_await() {
-        let mut generator = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle, ()| async move {
             #[expect(clippy::let_underscore_future)]
             let _ = handle.yield_(true); // Never gets yield
             handle.yield_(true).await;
@@ -255,7 +274,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "`async fn` resumed after completion")]
     fn test_resumed_after_completion() {
-        let mut generator = Generator::new(|handle| async move {
+        let mut generator = Generator::new(|handle, ()| async move {
             handle.yield_(42i32).await;
             handle.yield_(21).await;
             "Ok"
