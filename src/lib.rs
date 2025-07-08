@@ -1,7 +1,6 @@
 #![deny(rust_2018_idioms)]
-#![deny(missing_docs)]
-
-//! This crate provides a coroutine implementation based on Rust's async/await syntax.
+#![warn(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 mod executor;
 mod yield_now;

@@ -1,8 +1,10 @@
 [package]
 name = "async_coroutine"
+description = "A coroutine implementation based on Rust's async/await syntax."
 version = "0.1.0"
-authors = ["Jannik Obermann <jannik.obermann@gmail.com>"]
 edition = "2024"
-publish = false
+authors = ["Jannik Obermann <jannik.obermann@gmail.com>"]
+repository = "https://github.com/jannik4/bevy_capture"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
